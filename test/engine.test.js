@@ -339,5 +339,141 @@ check('fixPlan: 无冲突/空集时给出稳定空方案', () => {
   assert.strictEqual(f2.shadowAfter, 0);
 });
 
+// ---------- 请求行为回归预演（samples） ----------
+check('samples: 按当前优先级计算首条命中，支持 ALL 规则与通配符语义', () => {
+  const res = analyze(
+    [
+      { method: 'GET', path: '/api/*' },
+      { method: 'GET', path: '/api/users/:id' },
+      { method: 'ALL', path: '/assets/*' },
+      { method: 'GET', path: '/' },
+    ],
+    { samples: ['GET /api/users/123', 'DELETE /assets/css/a.css', 'GET /assets', 'GET /'] }
+  );
+  const [s1, s2, s3, s4] = res.samples.results;
+  assert.strictEqual(s1.hit.index, 0); // /api/* 优先于更具体的 :id
+  assert.strictEqual(s2.hit.index, 2); // ALL 规则命中 DELETE
+  assert.strictEqual(s3.hit.index, 2); // * 匹配零个段
+  assert.strictEqual(s4.hit.index, 3); // 根路径精确命中
+  assert.strictEqual(res.samples.total, 4);
+  assert.strictEqual(res.samples.validCount, 4);
+  assert.strictEqual(res.samples.unmatched, 0);
+});
+
+check('samples: 无匹配时 hit 为 null 并计入 unmatched；方法不兼容即无匹配', () => {
+  const res = analyze(
+    [{ method: 'GET', path: '/only-get' }],
+    { samples: ['POST /only-get', 'GET /other'] }
+  );
+  assert.strictEqual(res.samples.results[0].hit, null);
+  assert.strictEqual(res.samples.results[1].hit, null);
+  assert.strictEqual(res.samples.unmatched, 2);
+  assert.strictEqual(res.samples.validCount, 2);
+});
+
+check('samples: 校验具体方法与具体路径，错误逐条可读', () => {
+  const res = analyze(
+    [{ method: 'GET', path: '/x/*' }],
+    { samples: ['GET /x/:id', 'GET /x/*', 'ALL /x', 'GET', 'FOO /x', 'GET /a b'] }
+  );
+  const r = res.samples.results;
+  assert.strictEqual(r[0].valid, false); // 参数段不是具体路径
+  assert.strictEqual(r[1].valid, false); // 通配符不是具体路径
+  assert.strictEqual(r[2].valid, false); // ALL 不是具体方法
+  assert.strictEqual(r[3].valid, false); // 缺少路径
+  assert.strictEqual(r[4].valid, false); // 非法方法
+  assert.strictEqual(r[5].valid, false); // 路径含空白
+  assert.strictEqual(res.samples.validCount, 0);
+  assert.ok(r[0].errors.join('').includes('具体路径'));
+  assert.ok(r[1].errors.join('').includes('通配符'));
+  assert.ok(r[2].errors.join('').includes('具体方法'));
+  assert.ok(r.every((s) => s.hit === null));
+});
+
+check('samples: 空白行被跳过，结果保留输入行号与顺序', () => {
+  const res = analyze(
+    [{ method: 'GET', path: '/a' }],
+    { samples: ['', 'GET /a', '   ', 'GET /missing'] }
+  );
+  assert.strictEqual(res.samples.total, 2);
+  assert.strictEqual(res.samples.results[0].line, 2);
+  assert.strictEqual(res.samples.results[1].line, 4);
+  assert.strictEqual(res.samples.results[0].input, 'GET /a');
+  assert.strictEqual(res.samples.results[0].hit.index, 0);
+  assert.strictEqual(res.samples.results[1].hit, null);
+});
+
+check('samples: 无效规则不参与命中', () => {
+  const res = analyze(
+    [
+      { method: 'GET', path: 'bad-path' },
+      { method: 'GET', path: '/ok' },
+    ],
+    { samples: ['GET /ok'] }
+  );
+  assert.strictEqual(res.samples.results[0].hit.index, 1);
+});
+
+check('samples: 支持 { method, path } 对象形式，方法大小写不敏感', () => {
+  const res = analyze(
+    [{ method: 'GET', path: '/obj/:id' }],
+    { samples: [{ method: 'get', path: '/obj/9' }] }
+  );
+  const s = res.samples.results[0];
+  assert.strictEqual(s.valid, true);
+  assert.strictEqual(s.method, 'GET');
+  assert.strictEqual(s.hit.index, 0);
+});
+
+check('sampleReplay: 建议顺序下命中改变被标出，可定位新旧规则位置', () => {
+  const res = analyze(
+    [
+      { method: 'GET', path: '/api/*' },
+      { method: 'GET', path: '/api/users/:id' },
+    ],
+    { samples: ['GET /api/users/7'] }
+  );
+  const rp = res.fixPlan.sampleReplay;
+  assert.strictEqual(rp.total, 1);
+  assert.strictEqual(rp.changed, 1);
+  const r = rp.results[0];
+  assert.strictEqual(r.before.index, 0); // 当前命中 /api/*
+  assert.strictEqual(r.after.index, 1); // 建议顺序下命中 :id
+  assert.strictEqual(r.afterPosition, 1); // :id 被提升到第 1 位
+  assert.strictEqual(r.changed, true);
+  assert.strictEqual(r.unmatchedBefore, false);
+  assert.strictEqual(r.unmatchedAfter, false);
+});
+
+check('sampleReplay: 原本/调整后无匹配分别标注；无效样例不参与对比', () => {
+  const res = analyze(
+    [
+      { method: 'GET', path: '/api/*' },
+      { method: 'GET', path: '/api/users/:id' },
+    ],
+    { samples: ['GET /none', 'GET /api/users/7', 'BAD /x'] }
+  );
+  const rp = res.fixPlan.sampleReplay;
+  assert.strictEqual(rp.total, 2); // 无效样例不参与
+  const [none, moved] = rp.results;
+  assert.strictEqual(none.before, null);
+  assert.strictEqual(none.after, null);
+  assert.strictEqual(none.unmatchedBefore, true);
+  assert.strictEqual(none.unmatchedAfter, true);
+  assert.strictEqual(none.changed, false); // 前后都无匹配不算“命中改变”
+  assert.strictEqual(moved.changed, true);
+  assert.strictEqual(rp.unmatchedBefore, 1);
+  assert.strictEqual(rp.unmatchedAfter, 1);
+});
+
+check('samples: 不传 samples 时响应不含相关字段（向后兼容）', () => {
+  const res = analyze([{ method: 'GET', path: '/a' }]);
+  assert.strictEqual('samples' in res, false);
+  assert.strictEqual('sampleReplay' in res.fixPlan, false);
+  const res2 = analyze([{ method: 'GET', path: '/a' }], { samples: [] });
+  assert.strictEqual(res2.samples.total, 0);
+  assert.strictEqual('sampleReplay' in res2.fixPlan, false);
+});
+
 
 console.log(`\n全部 ${passed} 个测试通过。`);

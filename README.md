@@ -6,6 +6,8 @@
 拖动行调整顺序后结果立即重算。还可一键**生成修复方案**：把规则按语言等价关系分组、
 将“更具体规则必须位于严格覆盖它的规则之前”建模为约束图，给出确定性的建议顺序，
 预览调整前后位置与残留遮蔽数后一次应用。支持规则集的 JSON 导入 / 导出。
+另支持**请求行为回归预演**：逐行输入“方法 路径”的真实请求样例，按当前优先级计算
+首条命中规则，并在修复方案预览中用同一批样例对比建议顺序前后的命中变化。
 
 ## 一条命令启动
 
@@ -69,6 +71,29 @@ docker compose up --build
 实时分析自动重算，并照常保存到浏览器 localStorage。规则被增删、拖拽、导入或重置时，
 已打开的预览会自动关闭，避免索引过期。
 
+## 请求行为回归预演
+
+结果面板顶部的**请求回归预演**区支持逐行输入真实请求样例（每行格式：`方法 路径`）：
+
+```
+GET /api/users/123
+POST /api/users
+DELETE /assets/css/site.css
+```
+
+- 系统按**当前优先级**逐条计算**首条命中规则**，结果按输入顺序展示并标注原始行号；
+  点击命中规则芯片可滚动定位并高亮对应规则行；
+- 命中语义与冲突分析一致：`ALL` 规则可被任意方法命中，`*` 匹配零或多个段，
+  `:param` 匹配一个非空段；不同具体方法的规则互不影响；
+- 样例校验：方法必须是**具体方法**（`GET`/`POST`/…，不接受 `ALL`），路径必须是
+  **具体路径**（不接受 `:参数` 与 `*`）；无效样例逐条标注错误原因，空白行自动忽略；
+- 规则编辑、拖拽重排、导入或重置后，全部样例**自动重算**；样例文本保存到浏览器
+  localStorage，刷新后保留；
+- 打开 **🛠 生成修复方案** 预览时，同一批样例会按**建议顺序**再算一遍首条命中，
+  逐条对比并标出：**命中改变**、**原本无匹配**、**调整后无匹配**的请求
+  （重排不改变可匹配的请求集合，因此无匹配通常前后一致；命中规则可能因优先级
+  变化而改变）。对比行中的规则同样可点击定位。
+
 ## JSON 导入 / 导出
 
 导出文件格式（也兼容直接导入裸数组）：
@@ -88,7 +113,18 @@ docker compose up --build
 
 ## HTTP API
 
-- `POST /api/analyze` — 请求体 `{ "rules": [{ "method": "GET", "path": "/x/:id" }] }`，
+- `POST /api/analyze` — 请求体：
+
+  ```json
+  {
+    "rules": [{ "method": "GET", "path": "/x/:id" }],
+    "samples": ["GET /x/1", "DELETE /assets/a.css"]
+  }
+  ```
+
+  `samples` 可选（缺省时响应不含相关字段）：每行一个“方法 路径”字符串，
+  也兼容 `{ "method": "GET", "path": "/x/1" }` 对象；空白行被跳过，最多 1000 条。
+
   返回逐条规则的校验/冲突标注、冲突列表（含 `type`、`higher`、`lower`、`example`）与汇总计数，
   并额外包含 `fixPlan` 修复方案对象：
   - `needed` / `feasible`：是否存在遮蔽、约束图是否可排序（严格偏序下恒为 `true`）；
@@ -102,20 +138,33 @@ docker compose up --build
     `resolvableByOrder` 标记；`unavoidablePairs`：等价规则对清单；
   - `residualConflicts`：应用后仍存在的冲突（含应用后的新位置与示例）。
 
+  请求携带 `samples` 时，响应额外包含**请求行为回归预演**结果：
+  - `samples`：按当前优先级的首条命中计算
+    - `total` / `validCount` / `unmatched`：样例总数、有效数、有效但无匹配数；
+    - `results[]`：按输入顺序逐条返回 `{ index, line, input, method, path, valid, errors, hit }`；
+      `line` 为原始输入行号（1-based），`hit` 为首条命中规则
+      `{ index, id, method, path }`，无匹配为 `null`；
+  - `fixPlan.sampleReplay`（仅当存在有效样例时）：同一批样例 × 建议顺序的前后对比
+    - `total` / `changed` / `unmatchedBefore` / `unmatchedAfter`：有效样例数、
+      命中改变数、原本无匹配数、调整后无匹配数；
+    - `results[]`：`{ index, line, input, before, after, afterPosition, changed,
+      unmatchedBefore, unmatchedAfter }`；`before` / `after` 为命中规则引用或 `null`，
+      `after.index` 为规则原始索引，`afterPosition` 为建议顺序中的 1-based 位置。
+
 顶层还包含 `signature`：当前规则集（顺序 + 方法 + 路径）的内容签名，前端据此判断
-预览中的方案是否已因编辑而过期。
+预览中的方案是否已因编辑而过期（样例不参与签名）。
 - `GET /api/health` — 健康检查。
 
 返回仅为**新增字段**，既有 `rules` / `conflicts` / `summary` 结构不变；
-JSON 导入/导出仍使用 `route-conflict-lab/v1` 格式（裸数组同样兼容），修复方案由后端
-即时重算，不需要持久化，因此导入导出格式完全向后兼容。
+JSON 导入/导出仍使用 `route-conflict-lab/v1` 格式（裸数组同样兼容），修复方案与
+请求预演均由后端即时重算，不需要持久化，因此导入导出格式完全向后兼容。
 
 ## 本地开发
 
 ```bash
 npm install
 npm start          # 启动服务，http://localhost:3000
-npm test           # 分析引擎 33 个断言测试 + 前端冒烟测试
+npm test           # 分析引擎 42 个断言测试 + 前端冒烟测试
 ```
 
 ## 实现说明
@@ -127,19 +176,21 @@ npm test           # 分析引擎 33 个断言测试 + 前端冒烟测试
 - 交集示例：在乘积 DFA 上按段数做 BFS，同层边按段值字典序处理，首个到达的共同接受状态
   即为“段数最少、并列字典序最小”的示例路径；
 - 修复方案：对所有方法兼容的有效规则对计算双向覆盖关系，并查集聚成语言等价组，
-  严格覆盖关系收缩为组间约束图后做确定性拓扑排序，再按新顺序重新分析得出残留遮蔽数。
+  严格覆盖关系收缩为组间约束图后做确定性拓扑排序，再按新顺序重新分析得出残留遮蔽数；
+- 请求回归预演：样例的具体段序列在每条规则的 DFA 上逐段转移判定接受，按规则顺序取
+  首条命中；修复方案用同一批样例在建议顺序的规则序列上重算，逐条对比命中变化。
 
 ## 目录结构
 
 ```
 .
 ├── server.js                  # Express 服务（静态页面 + /api/analyze）
-├── lib/analyzer.js            # 路由冲突分析引擎（NFA/DFA 乘积自动机 + 修复方案）
+├── lib/analyzer.js            # 路由冲突分析引擎（NFA/DFA 乘积自动机 + 修复方案 + 请求预演）
 ├── public/                    # 原生前端（HTML/CSS/JS）
 │   ├── index.html
 │   ├── styles.css
 │   └── app.js
-├── test/engine.test.js        # 引擎测试（33 个断言）
+├── test/engine.test.js        # 引擎测试（42 个断言）
 ├── test/frontend.smoke.test.js# 前端交互冒烟测试（最小 DOM stub）
 ├── Dockerfile
 └── docker-compose.yml

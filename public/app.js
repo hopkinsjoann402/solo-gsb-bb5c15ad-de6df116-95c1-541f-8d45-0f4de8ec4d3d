@@ -5,6 +5,7 @@
  */
 
 const STORAGE_KEY = 'route-conflict-lab.rules.v1';
+const SAMPLES_STORAGE_KEY = 'route-conflict-lab.samples.v1';
 
 const DEFAULT_RULES = [
   { method: 'GET', path: '/api/*' },
@@ -17,6 +18,14 @@ const DEFAULT_RULES = [
   { method: 'POST', path: '/api/users' },
 ];
 
+/* 默认请求样例：覆盖命中、无匹配与 ALL/通配符语义，便于首次打开即看到预演效果 */
+const DEFAULT_SAMPLES = [
+  'GET /api/users/123',
+  'GET /assets/css/site.css',
+  'POST /api/users',
+  'GET /nowhere/deep',
+].join('\n');
+
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'ALL'];
 
 const listEl = document.getElementById('rules-list');
@@ -25,6 +34,9 @@ const summaryEl = document.getElementById('summary');
 const toastEl = document.getElementById('toast');
 const fixEl = document.getElementById('fix-plan');
 const fixBtnEl = document.getElementById('btn-fix');
+const samplesInput = document.getElementById('samples-input');
+const samplesSummaryEl = document.getElementById('samples-summary');
+const samplesResultEl = document.getElementById('samples-result');
 
 let rules = loadRules();
 let dragIndex = null;
@@ -56,6 +68,31 @@ function saveRules() {
   } catch (_e) {
     /* 忽略隐私模式等写入失败 */
   }
+}
+
+/* ---------------- 请求样例（回归预演输入） ---------------- */
+
+function loadSamplesText() {
+  try {
+    const v = localStorage.getItem(SAMPLES_STORAGE_KEY);
+    // 首次使用（从未保存过）时给出默认样例；用户清空后保持为空
+    return typeof v === 'string' ? v : DEFAULT_SAMPLES;
+  } catch (_e) {
+    return DEFAULT_SAMPLES;
+  }
+}
+
+function saveSamplesText() {
+  try {
+    localStorage.setItem(SAMPLES_STORAGE_KEY, samplesInput.value);
+  } catch (_e) {
+    /* 忽略隐私模式等写入失败 */
+  }
+}
+
+/** 当前输入框中的样例行（含空白行，由后端跳过并保留行号） */
+function currentSampleLines() {
+  return String(samplesInput.value || '').split('\n');
 }
 
 function showToast(msg, kind = '') {
@@ -212,7 +249,7 @@ async function analyze() {
     const resp = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rules }),
+      body: JSON.stringify({ rules, samples: currentSampleLines() }),
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     lastAnalysis = await resp.json();
@@ -222,6 +259,8 @@ async function analyze() {
     summaryEl.innerHTML = '';
     conflictsEl.innerHTML =
       `<div class="empty-state">分析失败：${escapeHTML(err.message)}</div>`;
+    samplesSummaryEl.innerHTML = '';
+    samplesResultEl.innerHTML = '';
   }
 }
 
@@ -280,8 +319,9 @@ function paintAnalysis() {
   }
 
   // “生成修复方案”仅在存在遮蔽时可用；规则内容变化则收起可能过期的预览
+  // （签名只覆盖规则集：仅编辑样例时预览保持打开并用新对比结果重绘）
   const fp = lastAnalysis.fixPlan;
-  if (fixOpen && fp && fp.signature !== currentSignature()) {
+  if (fixOpen && fp && lastAnalysis.signature !== currentSignature()) {
     closeFix();
   }
   if (fp && fp.needed) {
@@ -291,6 +331,9 @@ function paintAnalysis() {
     closeFix();
   }
   if (fixOpen && fp) renderFixPlan(fp);
+
+  // 请求行为回归预演：按当前优先级逐条展示首条命中
+  renderSamples(lastAnalysis.samples);
 
   // 冲突卡片
   conflictsEl.innerHTML = '';
@@ -368,6 +411,80 @@ function routeLine(tag, endpoint) {
   p.title = `规则 #${endpoint.index + 1}`;
   wrap.append(t, method, p);
   return wrap;
+}
+
+/* ---------------- 请求行为回归预演（首条命中） ---------------- */
+
+function renderSamples(data) {
+  samplesSummaryEl.innerHTML = '';
+  samplesResultEl.innerHTML = '';
+  if (!data || data.total === 0) {
+    samplesResultEl.innerHTML =
+      '<div class="samples-empty">输入样例后，将按当前优先级逐条计算首条命中规则；空白行会被忽略。</div>';
+    return;
+  }
+
+  const invalid = data.total - data.validCount;
+  const parts = [
+    `共 ${data.total} 条`,
+    `命中 ${data.validCount - data.unmatched}`,
+    `无匹配 ${data.unmatched}`,
+  ];
+  if (invalid > 0) parts.push(`无效 ${invalid}`);
+  samplesSummaryEl.textContent = parts.join(' · ');
+
+  for (const s of data.results) {
+    samplesResultEl.appendChild(renderSampleRow(s));
+  }
+}
+
+function renderSampleRow(s) {
+  const state = !s.valid ? 'invalid' : s.hit ? 'hit' : 'unmatched';
+  const row = document.createElement('div');
+  row.className = `sample-row s-${state}`;
+
+  const line = document.createElement('span');
+  line.className = 'sample-line';
+  line.textContent = `L${s.line}`;
+  line.title = `输入第 ${s.line} 行`;
+
+  const input = document.createElement('span');
+  input.className = 'sample-input';
+  input.textContent = s.input;
+
+  const verdict = document.createElement('span');
+  verdict.className = 'sample-verdict';
+  if (!s.valid) {
+    verdict.appendChild(badgeEl('invalid', '无效样例'));
+    const err = document.createElement('span');
+    err.className = 'sample-err';
+    err.textContent = s.errors.join('；');
+    verdict.appendChild(err);
+  } else if (s.hit) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'sample-hit';
+    chip.textContent = `#${s.hit.index + 1} ${s.hit.method} ${s.hit.path}`;
+    chip.title = '点击定位到该规则';
+    chip.addEventListener('click', () => locateRule(s.hit.index));
+    verdict.appendChild(chip);
+  } else {
+    verdict.appendChild(badgeEl('partial', '无匹配规则'));
+  }
+
+  row.append(line, input, verdict);
+  return row;
+}
+
+/** 滚动定位并短暂高亮指定规则行（预演结果与修复预览共用） */
+function locateRule(index) {
+  const row = listEl.children[index];
+  if (!row) return;
+  if (typeof row.scrollIntoView === 'function') {
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+  row.classList.add('row-locate');
+  setTimeout(() => row.classList.remove('row-locate'), 1600);
 }
 
 function escapeHTML(s) {
@@ -521,6 +638,28 @@ function renderFixPlan(fp) {
     }
   }
 
+  // 请求行为回归预演：同一批样例 × 建议顺序，逐条对比命中变化
+  const replayBox = document.createElement('div');
+  if (fp.sampleReplay && fp.sampleReplay.results.length > 0) {
+    const rp = fp.sampleReplay;
+    replayBox.className = 'fix-samples';
+    const label = document.createElement('div');
+    label.className = 'fix-section-label';
+    label.textContent = '请求行为回归预演（同一批样例 × 建议顺序）';
+    replayBox.appendChild(label);
+
+    const sum = document.createElement('div');
+    sum.className = 'fix-samples-summary';
+    sum.textContent =
+      `共 ${rp.total} 条有效样例 · 命中改变 ${rp.changed} · ` +
+      `原本无匹配 ${rp.unmatchedBefore} · 调整后无匹配 ${rp.unmatchedAfter}`;
+    replayBox.appendChild(sum);
+
+    for (const r of rp.results) {
+      replayBox.appendChild(renderReplayRow(r));
+    }
+  }
+
   // 操作按钮：预览后一次应用 / 取消
   const actions = document.createElement('div');
   actions.className = 'fix-actions';
@@ -539,7 +678,67 @@ function renderFixPlan(fp) {
   cancelBtn.addEventListener('click', () => closeFix());
   actions.append(applyBtn, cancelBtn);
 
-  fixEl.append(head, stats, verdict, orderBox, groupsBox, remainBox, actions);
+  fixEl.append(head, stats, verdict, orderBox, replayBox, groupsBox, remainBox, actions);
+}
+
+/** 修复预览中的单条样例对比行：当前命中 → 建议顺序命中 */
+function renderReplayRow(r) {
+  const row = document.createElement('div');
+  row.className =
+    'fs-row' +
+    (r.changed ? ' fs-changed' : '') +
+    (r.unmatchedBefore || r.unmatchedAfter ? ' fs-unmatched' : '');
+
+  const badge = document.createElement('span');
+  if (r.changed) {
+    badge.className = 'fs-badge fb-changed';
+    badge.textContent = '命中改变';
+  } else if (r.unmatchedBefore && r.unmatchedAfter) {
+    badge.className = 'fs-badge fb-unmatched';
+    badge.textContent = '始终无匹配';
+  } else if (r.unmatchedBefore) {
+    badge.className = 'fs-badge fb-unmatched';
+    badge.textContent = '原本无匹配';
+  } else if (r.unmatchedAfter) {
+    badge.className = 'fs-badge fb-unmatched';
+    badge.textContent = '调整后无匹配';
+  } else {
+    badge.className = 'fs-badge fb-same';
+    badge.textContent = '不变';
+  }
+
+  const input = document.createElement('span');
+  input.className = 'fs-input';
+  input.textContent = r.input;
+
+  const before = document.createElement('span');
+  before.className = 'fs-hit';
+  if (r.before) {
+    before.textContent = `#${r.before.index + 1} ${r.before.method} ${r.before.path}`;
+    before.classList.add('fs-hit-link');
+    before.title = '点击定位到该规则';
+    before.addEventListener('click', () => locateRule(r.before.index));
+  } else {
+    before.textContent = '（无匹配）';
+  }
+
+  const arrow = document.createElement('span');
+  arrow.className = 'fs-arrow';
+  arrow.textContent = '→';
+
+  const after = document.createElement('span');
+  after.className = 'fs-hit';
+  if (r.after) {
+    after.textContent = `#${r.afterPosition} ${r.after.method} ${r.after.path}`;
+    after.classList.add('fs-hit-link');
+    after.title = `调整后位于第 ${r.afterPosition} 位（点击定位当前规则）`;
+    after.addEventListener('click', () => locateRule(r.after.index));
+  } else {
+    after.textContent = '（无匹配）';
+  }
+
+  row.append(badge, input, before, arrow, after);
+  return row;
 }
 
 function fixStat(cls, label, n) {
@@ -669,5 +868,10 @@ document.getElementById('file-import').addEventListener('change', (e) => {
 });
 
 /* ---------------- 启动 ---------------- */
+samplesInput.value = loadSamplesText();
+samplesInput.addEventListener('input', () => {
+  saveSamplesText();
+  scheduleAnalyze();
+});
 renderRules();
 scheduleAnalyze(true);

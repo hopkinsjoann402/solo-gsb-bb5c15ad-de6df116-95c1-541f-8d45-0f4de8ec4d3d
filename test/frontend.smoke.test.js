@@ -69,6 +69,7 @@ function makeEl(tag) {
 const ids = [
   'rules-list', 'conflicts', 'summary', 'toast', 'fix-plan', 'btn-fix',
   'btn-add', 'btn-reset', 'btn-export', 'btn-import', 'file-import',
+  'samples-input', 'samples-summary', 'samples-result',
 ];
 const els = {};
 for (const id of ids) els[id] = makeEl('div');
@@ -92,7 +93,7 @@ const sandbox = {
     return {
       ok: true,
       status: 200,
-      json: async () => analyze(body.rules),
+      json: async () => analyze(body.rules, { samples: body.samples }),
     };
   },
   URL: { createObjectURL: () => 'blob:x', revokeObjectURL: () => {} },
@@ -109,6 +110,31 @@ vm.runInContext(code, sandbox);
 (async () => {
   await new Promise((r) => setTimeout(r, 30));
 
+  // 0) 请求回归预演：默认样例随首次分析即时计算首条命中
+  const samplesText0 = els['samples-result'].textContent;
+  assert.ok(
+    samplesText0.includes('#1 GET /api/*'),
+    '默认顺序下 GET /api/users/123 应首条命中 #1 /api/*'
+  );
+  assert.ok(
+    samplesText0.includes('#8 POST /api/users'),
+    'POST /api/users 应命中第 8 条规则'
+  );
+  assert.ok(samplesText0.includes('无匹配规则'), '无匹配样例应被标注');
+
+  // 0b) 编辑样例 -> 防抖重算 + 本地保存；非法样例逐条标注
+  els['samples-input'].value = 'GET /api/users/123\nBADMETHOD /x\nGET /x/:bad';
+  els['samples-input'].dispatch('input');
+  await new Promise((r) => setTimeout(r, 250)); // 防抖 150ms
+  const samplesText = els['samples-result'].textContent;
+  assert.ok(samplesText.includes('#1 GET /api/*'), '样例编辑后应自动重算命中');
+  assert.ok(samplesText.includes('无效样例'), '非法方法/非具体路径应标为无效样例');
+  assert.strictEqual(
+    storage['route-conflict-lab.samples.v1'],
+    'GET /api/users/123\nBADMETHOD /x\nGET /x/:bad',
+    '样例文本应持久化到 localStorage'
+  );
+
   // 1) 默认示例存在 4 条遮蔽 -> 修复按钮可见
   assert.strictEqual(els['btn-fix'].hidden, false, '存在遮蔽时应显示“生成修复方案”按钮');
 
@@ -124,6 +150,10 @@ vm.runInContext(code, sandbox);
   // 默认示例全部可修复
   assert.ok(previewText.includes('一次应用（移动 4 条）'), '应显示一次应用按钮及移动数');
   assert.ok(!/仍将存在的/.test(previewText), '全可修复时不应有残留遮蔽区块');
+  // 请求行为回归预演对比：同一批样例 × 建议顺序
+  assert.ok(previewText.includes('请求行为回归预演'), '预览应包含样例对比区块');
+  assert.ok(previewText.includes('命中改变'), '应标出命中规则改变的样例');
+  assert.ok(previewText.includes('#1 GET /api/users/:id'), '应展示建议顺序下的新命中规则');
 
   // 3) 一次应用
   const applyBtn = els['fix-plan']
@@ -143,6 +173,13 @@ vm.runInContext(code, sandbox);
   assert.strictEqual(els['fix-plan'].hidden, true, '应用后应收起预览');
   assert.strictEqual(els['btn-fix'].hidden, true, '无遮蔽时修复按钮应隐藏');
 
+  // 3b) 应用修复后样例自动重算：/api/users/:id 提升为第 1 位并被首条命中
+  const samplesAfter = els['samples-result'].textContent;
+  assert.ok(
+    samplesAfter.includes('#1 GET /api/users/:id'),
+    '应用修复后应命中提升后的 :id 规则'
+  );
+
   // 4) 不可消除场景：导入含等价重复规则的规则集，预览必须如实标注残留遮蔽
   sandbox.FileReader = class {
     readAsText() {
@@ -161,6 +198,12 @@ vm.runInContext(code, sandbox);
   els['file-import'].dispatch('change', { target: { files: [{}], value: '' } });
   await new Promise((r) => setTimeout(r, 30));
   assert.strictEqual(els['btn-fix'].hidden, false, '含遮蔽时应显示修复按钮');
+  // 导入后样例按新规则集自动重算
+  const samplesImported = els['samples-result'].textContent;
+  assert.ok(
+    samplesImported.includes('#1 GET /*'),
+    '导入新规则集后样例应自动重算（/* 首条命中）'
+  );
   els['btn-fix'].dispatch('click');
   await new Promise((r) => setTimeout(r, 10));
   const text2 = els['fix-plan'].textContent;

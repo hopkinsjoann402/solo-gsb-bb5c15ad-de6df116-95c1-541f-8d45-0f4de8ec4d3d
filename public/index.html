@@ -58,6 +58,22 @@
         </div>
       </div>
       <div id="fix-plan" class="fix-plan" hidden></div>
+
+      <section class="samples-block" aria-label="请求行为回归预演">
+        <div class="samples-head">
+          <h3>🧪 请求行为回归预演</h3>
+          <span class="hint">逐行输入“方法 路径”（具体路径），按当前优先级计算首条命中规则；修复方案预览会用同一批样例对比建议顺序</span>
+        </div>
+        <textarea
+          id="samples-input"
+          rows="4"
+          spellcheck="false"
+          placeholder="GET /api/users/123&#10;POST /api/users&#10;DELETE /assets/css/site.css"
+        ></textarea>
+        <div id="samples-summary" class="samples-summary"></div>
+        <div id="samples-result" class="samples-result"></div>
+      </section>
+
       <div id="conflicts" class="conflicts"></div>
       <div id="toast" class="toast" hidden></div>
     </section>

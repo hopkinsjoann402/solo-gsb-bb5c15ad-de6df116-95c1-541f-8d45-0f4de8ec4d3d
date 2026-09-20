@@ -327,3 +327,94 @@ code {
 
 .fix-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .btn:disabled { opacity: .55; cursor: default; transform: none; }
+
+/* ---------------- 请求行为回归预演 ---------------- */
+.samples-block { margin-bottom: 14px; }
+.samples-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.samples-head h3 { margin: 0; font-size: 13.5px; }
+#samples-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+  background: #101725;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  font-family: var(--mono);
+  line-height: 1.7;
+}
+#samples-input:focus { outline: none; border-color: var(--accent); }
+.samples-summary { font-size: 11.5px; color: var(--muted); margin: 6px 2px; }
+.samples-result {
+  display: flex; flex-direction: column; gap: 5px;
+  max-height: 30vh; overflow-y: auto; padding-right: 2px;
+}
+.samples-empty { color: var(--muted); font-size: 12px; padding: 6px 2px; line-height: 1.6; }
+.sample-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1.1fr) minmax(0, 1.6fr);
+  gap: 8px;
+  align-items: center;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 9px;
+  font-size: 12px;
+}
+.sample-row.s-unmatched { border-color: rgba(245, 165, 36, .5); }
+.sample-row.s-invalid { border-color: rgba(255, 77, 79, .5); }
+.sample-line { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+.sample-input { font-family: var(--mono); overflow-wrap: anywhere; }
+.sample-verdict { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.sample-hit {
+  background: rgba(46, 204, 113, .12);
+  color: var(--ok);
+  border: 1px solid rgba(46, 204, 113, .4);
+  border-radius: 7px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 3px 8px;
+  cursor: pointer;
+  text-align: left;
+}
+.sample-hit:hover { background: rgba(46, 204, 113, .22); }
+.sample-err { color: var(--invalid); font-size: 11px; }
+
+/* 定位规则行时的高亮动画 */
+.rule-row.row-locate { animation: locate-flash 1.6s ease; }
+@keyframes locate-flash {
+  0%, 60% { box-shadow: 0 0 0 2px var(--accent); }
+  100% { box-shadow: none; }
+}
+
+/* 修复方案中的样例前后对比 */
+.fix-samples { margin-bottom: 12px; }
+.fix-samples-summary { font-size: 12px; color: var(--muted); margin-bottom: 7px; }
+.fs-row {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1.1fr) minmax(0, 1.4fr) 18px minmax(0, 1.4fr);
+  gap: 7px;
+  align-items: center;
+  padding: 5px 8px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  background: rgba(16, 23, 37, .6);
+  border: 1px solid var(--border);
+  margin-bottom: 5px;
+}
+.fs-row.fs-changed { border-color: rgba(245, 165, 36, .55); }
+.fs-row.fs-unmatched { border-color: rgba(255, 77, 79, .45); }
+.fs-badge {
+  font-size: 10.5px; padding: 2px 7px; border-radius: 99px;
+  text-align: center; white-space: nowrap;
+}
+.fb-changed { background: rgba(245, 165, 36, .18); color: var(--partial); }
+.fb-unmatched { background: rgba(255, 77, 79, .16); color: var(--invalid); }
+.fb-same { background: rgba(46, 204, 113, .14); color: var(--ok); }
+.fs-input { font-family: var(--mono); overflow-wrap: anywhere; }
+.fs-hit { font-family: var(--mono); overflow-wrap: anywhere; }
+.fs-hit-link { cursor: pointer; color: #a8c0ff; }
+.fs-hit-link:hover { text-decoration: underline; }
+.fs-arrow { color: var(--muted); text-align: center; }
