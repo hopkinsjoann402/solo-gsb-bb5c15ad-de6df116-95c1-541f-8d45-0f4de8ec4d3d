@@ -7,6 +7,11 @@
 将“更具体规则必须位于严格覆盖它的规则之前”建模为约束图，给出确定性的建议顺序，
 预览调整前后位置与残留遮蔽数后一次应用。支持规则集的 JSON 导入 / 导出。
 
+内置**请求行为回归预演**：逐行输入 `方法 路径` 的真实请求样例，系统按当前优先级计算
+每条样例的**首条命中规则**；打开修复方案预览时，会用同一批样例对比“调整前 → 调整后”
+的命中结果，标出**命中规则改变**、**原本或调整后无匹配**的请求。规则编辑、导入或重排后
+自动重算，结果按输入顺序展示，点击命中徽章可定位对应规则行。
+
 ## 一条命令启动
 
 ```bash
@@ -69,6 +74,24 @@ docker compose up --build
 实时分析自动重算，并照常保存到浏览器 localStorage。规则被增删、拖拽、导入或重置时，
 已打开的预览会自动关闭，避免索引过期。
 
+## 请求行为回归预演
+
+底部“请求行为回归预演”面板中**逐行输入真实请求样例**（每行一条 `方法 路径`，空行忽略），
+系统按当前规则优先级计算每条样例的**首条命中规则**，结果按输入顺序逐条展示：
+
+- **样例校验**：方法必须是具体方法（`GET`/`POST`/…，真实请求没有 `ALL`）；路径必须是
+  **具体路径**——不允许 `:参数`、`*` 通配符，也不支持查询串 / 片段（`?`、`#`），
+  非法样例逐行报错，不影响其余样例；
+- **匹配语义与规则完全一致**：`ALL` 规则匹配任意方法，`*` 匹配零或多个段，
+  `:参数` 匹配一个非空段，不同具体方法的规则互不影响；
+- **定位规则**：点击命中徽章（如 `#3 GET /api/users/:id`）会滚动到左侧对应规则行并高亮闪烁；
+- **修复方案对比**：打开 **🛠 生成修复方案** 时，预览底部会用同一批样例对比
+  “调整前 → 调整后”的首条命中，逐条标出 **命中改变**、**原本无匹配**、**调整后无匹配**
+  （纯重排不会改变规则集合的并集语言，因此“是否命中”不变，只有命中对象可能改变；
+  前后均无匹配的样例会标为“始终无匹配”）；
+- **自动重算**：规则编辑、拖拽重排、导入、重置或应用修复后，预演结果随分析一并刷新；
+  样例文本同样保存在浏览器 localStorage。
+
 ## JSON 导入 / 导出
 
 导出文件格式（也兼容直接导入裸数组）：
@@ -88,7 +111,17 @@ docker compose up --build
 
 ## HTTP API
 
-- `POST /api/analyze` — 请求体 `{ "rules": [{ "method": "GET", "path": "/x/:id" }] }`，
+- `POST /api/analyze` — 请求体：
+
+  ```json
+  {
+    "rules": [{ "method": "GET", "path": "/x/:id" }],
+    "samples": ["GET /x/42", { "method": "POST", "path": "/x" }]
+  }
+  ```
+
+  `rules` 必填（≤ 500 条，数组顺序即优先级）；`samples` 可选（≤ 200 条），
+  每条为 `"方法 路径"` 字符串或 `{ "method", "path" }` 对象。
   返回逐条规则的校验/冲突标注、冲突列表（含 `type`、`higher`、`lower`、`example`）与汇总计数，
   并额外包含 `fixPlan` 修复方案对象：
   - `needed` / `feasible`：是否存在遮蔽、约束图是否可排序（严格偏序下恒为 `true`）；
@@ -100,22 +133,36 @@ docker compose up --build
   - `constraints`：约束图边 `{ narrower, wider, reason }`；
   - `equivalenceGroups`：语言等价组（`size > 1`）及组内不可消除遮蔽数、
     `resolvableByOrder` 标记；`unavoidablePairs`：等价规则对清单；
-  - `residualConflicts`：应用后仍存在的冲突（含应用后的新位置与示例）。
+  - `residualConflicts`：应用后仍存在的冲突（含应用后的新位置与示例）；
+  - `replay`：请求行为回归对比（未提供 `samples` 时为 `null`）：
+    - `summary`：`{ total, valid, invalid, changed, unmatchedBefore, unmatchedAfter }`；
+    - `samples[]`：按输入顺序逐条给出 `{ index, raw, valid, errors, before, after,
+      changed, unmatchedBefore, unmatchedAfter }`；`before` / `after` 为命中规则引用
+      `{ index, id, method, path, position }` 或 `null`（无匹配），其中 `index` 是
+      0-based 原始规则索引，`position` 是所在评估顺序中的 1-based 位置
+      （`before` 为当前顺序、`after` 为建议顺序）；`changed` 表示前后命中不同规则，
+      `unmatchedBefore` / `unmatchedAfter` 分别表示原本 / 调整后无匹配（无效样例两者均为 `false`）。
+
+  顶层 `replay`（未提供 `samples` 时为 `null`）是当前顺序下的预演结果：
+  - `summary`：`{ total, valid, invalid, matched, unmatched }`；
+  - `samples[]`：按输入顺序的 `{ index, raw, method, path, valid, errors, hit }`，
+    `hit` 为首条命中规则引用（结构同上，`position` 即当前 1-based 优先级位置）或 `null`。
 
 顶层还包含 `signature`：当前规则集（顺序 + 方法 + 路径）的内容签名，前端据此判断
 预览中的方案是否已因编辑而过期。
 - `GET /api/health` — 健康检查。
 
-返回仅为**新增字段**，既有 `rules` / `conflicts` / `summary` 结构不变；
-JSON 导入/导出仍使用 `route-conflict-lab/v1` 格式（裸数组同样兼容），修复方案由后端
-即时重算，不需要持久化，因此导入导出格式完全向后兼容。
+返回仅为**新增字段**，既有 `rules` / `conflicts` / `summary` / `fixPlan` 结构不变；
+不提供 `samples` 时响应与旧版完全一致（`replay` 与 `fixPlan.replay` 均为 `null`）。
+JSON 导入/导出仍使用 `route-conflict-lab/v1` 格式（裸数组同样兼容），修复方案与回归预演
+由后端即时重算，不需要持久化，因此导入导出格式完全向后兼容。
 
 ## 本地开发
 
 ```bash
 npm install
 npm start          # 启动服务，http://localhost:3000
-npm test           # 分析引擎 33 个断言测试 + 前端冒烟测试
+npm test           # 分析引擎 42 个断言测试 + 前端冒烟测试
 ```
 
 ## 实现说明
@@ -127,19 +174,21 @@ npm test           # 分析引擎 33 个断言测试 + 前端冒烟测试
 - 交集示例：在乘积 DFA 上按段数做 BFS，同层边按段值字典序处理，首个到达的共同接受状态
   即为“段数最少、并列字典序最小”的示例路径；
 - 修复方案：对所有方法兼容的有效规则对计算双向覆盖关系，并查集聚成语言等价组，
-  严格覆盖关系收缩为组间约束图后做确定性拓扑排序，再按新顺序重新分析得出残留遮蔽数。
+  严格覆盖关系收缩为组间约束图后做确定性拓扑排序，再按新顺序重新分析得出残留遮蔽数；
+- 回归预演：样例的具体路径段逐段驱动每条规则的 DFA（复用同一套 `ALL` / `:参数` / `*`
+  语义），按数组顺序取首条接受者；修复对比则在建议顺序上重放同一批样例并逐条比对命中对象。
 
 ## 目录结构
 
 ```
 .
 ├── server.js                  # Express 服务（静态页面 + /api/analyze）
-├── lib/analyzer.js            # 路由冲突分析引擎（NFA/DFA 乘积自动机 + 修复方案）
+├── lib/analyzer.js            # 路由冲突分析引擎（NFA/DFA 乘积自动机 + 修复方案 + 回归预演）
 ├── public/                    # 原生前端（HTML/CSS/JS）
 │   ├── index.html
 │   ├── styles.css
 │   └── app.js
-├── test/engine.test.js        # 引擎测试（33 个断言）
+├── test/engine.test.js        # 引擎测试（42 个断言）
 ├── test/frontend.smoke.test.js# 前端交互冒烟测试（最小 DOM stub）
 ├── Dockerfile
 └── docker-compose.yml

@@ -45,7 +45,7 @@
       <ol id="rules-list" class="rules-list"></ol>
       <p class="syntax-help">
         语法：<code>/static</code> 静态段 · <code>/:param</code> 参数（匹配一个非空段） · <code>/*</code> 通配符（匹配零或多个段）。
-        方法 <code>ALL</code> 表示与任意方法比较。
+        方法 <code>ALL</code> 表示与任意方法比较。下方可逐行输入真实请求样例，预演首条命中规则。
       </p>
     </section>
 
@@ -60,6 +60,21 @@
       <div id="fix-plan" class="fix-plan" hidden></div>
       <div id="conflicts" class="conflicts"></div>
       <div id="toast" class="toast" hidden></div>
+    </section>
+
+    <section class="panel replay-panel">
+      <div class="panel-head">
+        <h2>请求行为回归预演 <span class="hint">（每行一条 <code>方法 路径</code>，按当前优先级计算首条命中规则）</span></h2>
+        <div id="replay-summary" class="summary"></div>
+      </div>
+      <textarea id="samples-input" class="samples-input" rows="5" spellcheck="false"
+        placeholder="GET /api/users/42&#10;POST /api/users&#10;DELETE /api/users/42"></textarea>
+      <p class="syntax-help">
+        样例为真实请求：方法须为具体方法（<code>GET</code>/<code>POST</code>/…，不能是 <code>ALL</code>），
+        路径须为具体路径（不含 <code>:参数</code>、<code>*</code> 与查询串 <code>?…</code>）；空行忽略。
+        规则编辑、拖拽、导入或应用修复后自动重算；点击命中徽章可定位对应规则行。
+      </p>
+      <div id="replay-results" class="replay-results"></div>
     </section>
   </main>
 

@@ -5,6 +5,7 @@
  */
 
 const STORAGE_KEY = 'route-conflict-lab.rules.v1';
+const SAMPLES_KEY = 'route-conflict-lab.samples.v1';
 
 const DEFAULT_RULES = [
   { method: 'GET', path: '/api/*' },
@@ -17,6 +18,15 @@ const DEFAULT_RULES = [
   { method: 'POST', path: '/api/users' },
 ];
 
+/* 默认请求样例：覆盖命中 / 被宽规则截胡 / 无匹配 三种典型情形 */
+const DEFAULT_SAMPLES = [
+  'GET /api/users/42',
+  'POST /api/users',
+  'GET /assets/css/site.css',
+  'GET /health',
+  'DELETE /api/users/42',
+].join('\n');
+
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'ALL'];
 
 const listEl = document.getElementById('rules-list');
@@ -25,6 +35,9 @@ const summaryEl = document.getElementById('summary');
 const toastEl = document.getElementById('toast');
 const fixEl = document.getElementById('fix-plan');
 const fixBtnEl = document.getElementById('btn-fix');
+const samplesEl = document.getElementById('samples-input');
+const replaySummaryEl = document.getElementById('replay-summary');
+const replayResultsEl = document.getElementById('replay-results');
 
 let rules = loadRules();
 let dragIndex = null;
@@ -56,6 +69,32 @@ function saveRules() {
   } catch (_e) {
     /* 忽略隐私模式等写入失败 */
   }
+}
+
+function loadSamples() {
+  try {
+    const raw = localStorage.getItem(SAMPLES_KEY);
+    if (typeof raw === 'string') return raw;
+  } catch (_e) {
+    /* 存储不可用时回退到默认样例 */
+  }
+  return DEFAULT_SAMPLES;
+}
+
+function saveSamples() {
+  try {
+    localStorage.setItem(SAMPLES_KEY, samplesEl.value);
+  } catch (_e) {
+    /* 忽略写入失败 */
+  }
+}
+
+/** 逐行拆分样例输入：空行忽略，原始行文本原样交给后端解析校验 */
+function sampleLines() {
+  return samplesEl.value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 function showToast(msg, kind = '') {
@@ -212,7 +251,7 @@ async function analyze() {
     const resp = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rules }),
+      body: JSON.stringify({ rules, samples: sampleLines() }),
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     lastAnalysis = await resp.json();
@@ -222,6 +261,8 @@ async function analyze() {
     summaryEl.innerHTML = '';
     conflictsEl.innerHTML =
       `<div class="empty-state">分析失败：${escapeHTML(err.message)}</div>`;
+    replaySummaryEl.innerHTML = '';
+    replayResultsEl.innerHTML = '';
   }
 }
 
@@ -264,19 +305,10 @@ function paintAnalysis() {
 
   // 摘要
   summaryEl.innerHTML = '';
-  const pill = (cls, text, n) => {
-    const el = document.createElement('span');
-    el.className = `pill ${cls}`;
-    const num = document.createElement('span');
-    num.className = 'n';
-    num.textContent = n;
-    el.append(num, ` ${text}`);
-    return el;
-  };
-  summaryEl.appendChild(pill('pill-shadow', '完全遮蔽', summary.shadow));
-  summaryEl.appendChild(pill('pill-partial', '部分重叠', summary.partial));
+  summaryEl.appendChild(pillEl('pill-shadow', '完全遮蔽', summary.shadow));
+  summaryEl.appendChild(pillEl('pill-partial', '部分重叠', summary.partial));
   if (summary.total === 0) {
-    summaryEl.appendChild(pill('pill-ok', '无冲突', ''));
+    summaryEl.appendChild(pillEl('pill-ok', '无冲突', ''));
   }
 
   // “生成修复方案”仅在存在遮蔽时可用；规则内容变化则收起可能过期的预览
@@ -291,6 +323,9 @@ function paintAnalysis() {
     closeFix();
   }
   if (fixOpen && fp) renderFixPlan(fp);
+
+  // 请求行为回归预演（随每次分析自动重算）
+  paintReplay(lastAnalysis.replay);
 
   // 冲突卡片
   conflictsEl.innerHTML = '';
@@ -309,6 +344,16 @@ function badgeEl(kind, text) {
   b.className = `badge badge-${kind}`;
   b.textContent = text;
   return b;
+}
+
+function pillEl(cls, text, n) {
+  const el = document.createElement('span');
+  el.className = `pill ${cls}`;
+  const num = document.createElement('span');
+  num.className = 'n';
+  num.textContent = n;
+  el.append(num, ` ${text}`);
+  return el;
 }
 
 function renderConflictCard(c) {
@@ -374,6 +419,89 @@ function escapeHTML(s) {
   return String(s).replace(/[&<>"']/g, (ch) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[ch]));
+}
+
+/* ---------------- 请求行为回归预演 ---------------- */
+
+function paintReplay(replay) {
+  replaySummaryEl.innerHTML = '';
+  replayResultsEl.innerHTML = '';
+  if (!replay || replay.summary.total === 0) {
+    replayResultsEl.innerHTML =
+      '<div class="empty-state">在上方逐行输入真实请求样例（<code>方法 路径</code>），即可按当前优先级预演每条请求的首条命中规则。</div>';
+    return;
+  }
+  const s = replay.summary;
+  replaySummaryEl.appendChild(pillEl('pill-ok', '命中', s.matched));
+  replaySummaryEl.appendChild(pillEl('pill-partial', '无匹配', s.unmatched));
+  if (s.invalid > 0) {
+    replaySummaryEl.appendChild(pillEl('pill-shadow', '样例无效', s.invalid));
+  }
+  for (const sample of replay.samples) {
+    replayResultsEl.appendChild(renderSampleRow(sample));
+  }
+}
+
+function renderSampleRow(s) {
+  const row = document.createElement('div');
+  row.className = 'replay-row';
+
+  const no = document.createElement('span');
+  no.className = 'replay-no';
+  no.textContent = s.index + 1;
+
+  const raw = document.createElement('span');
+  raw.className = 'replay-raw';
+  raw.textContent = s.raw || '(空)';
+
+  const status = document.createElement('span');
+  status.className = 'replay-status';
+  if (!s.valid) {
+    row.classList.add('replay-invalid');
+    status.appendChild(badgeEl('invalid', '语法错误'));
+    const err = document.createElement('span');
+    err.className = 'row-error';
+    err.textContent = s.errors.join('；');
+    status.appendChild(err);
+  } else if (s.hit) {
+    status.appendChild(badgeEl('ok', '命中'));
+    status.appendChild(hitChip(s.hit));
+  } else {
+    row.classList.add('replay-unmatched');
+    status.appendChild(badgeEl('muted', '无匹配'));
+  }
+
+  row.append(no, raw, status);
+  return row;
+}
+
+/** 命中规则徽章：显示评估顺序中的位置，点击定位到左侧规则行 */
+function hitChip(hit) {
+  const chip = document.createElement('button');
+  chip.type = 'button';
+  chip.className = 'hit-chip';
+  chip.textContent = `#${hit.position} ${hit.method} ${hit.path}`;
+  chip.title = `定位规则（当前第 ${hit.index + 1} 位）`;
+  chip.addEventListener('click', () => locateRule(hit.index));
+  return chip;
+}
+
+function noneChip() {
+  const s = document.createElement('span');
+  s.className = 'replay-none';
+  s.textContent = '无匹配';
+  return s;
+}
+
+/** 滚动到对应规则行并短暂高亮 */
+function locateRule(index) {
+  const row = listEl.querySelector(`.rule-row[data-index="${index}"]`);
+  if (!row) return;
+  if (typeof row.scrollIntoView === 'function') {
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+  row.classList.add('row-flash');
+  setTimeout(() => row.classList.remove('row-flash'), 1200);
 }
 
 /* ---------------- 修复方案（确定性重排） ---------------- */
@@ -521,6 +649,23 @@ function renderFixPlan(fp) {
     }
   }
 
+  // 请求行为回归对比：同一批样例在建议顺序下的首条命中变化
+  const replayBox = document.createElement('div');
+  if (fp.replay && fp.replay.summary.total > 0) {
+    replayBox.className = 'fix-replay';
+    const rs = fp.replay.summary;
+    const rlabel = document.createElement('div');
+    rlabel.className = 'fix-section-label';
+    rlabel.textContent =
+      `请求行为对比（${rs.total} 条样例：命中改变 ${rs.changed} · ` +
+      `原本无匹配 ${rs.unmatchedBefore} · 调整后无匹配 ${rs.unmatchedAfter}` +
+      (rs.invalid > 0 ? ` · 样例无效 ${rs.invalid}` : '') + '）';
+    replayBox.appendChild(rlabel);
+    for (const d of fp.replay.samples) {
+      replayBox.appendChild(renderReplayDiffRow(d));
+    }
+  }
+
   // 操作按钮：预览后一次应用 / 取消
   const actions = document.createElement('div');
   actions.className = 'fix-actions';
@@ -539,7 +684,54 @@ function renderFixPlan(fp) {
   cancelBtn.addEventListener('click', () => closeFix());
   actions.append(applyBtn, cancelBtn);
 
-  fixEl.append(head, stats, verdict, orderBox, groupsBox, remainBox, actions);
+  fixEl.append(head, stats, verdict, orderBox, groupsBox, remainBox, replayBox, actions);
+}
+
+/** 修复预览中的单条样例对比行：调整前命中 → 调整后命中 + 变化标注 */
+function renderReplayDiffRow(d) {
+  const row = document.createElement('div');
+  row.className = 'replay-diff-row';
+
+  const raw = document.createElement('span');
+  raw.className = 'replay-raw';
+  raw.textContent = d.raw || '(空)';
+  row.appendChild(raw);
+
+  if (!d.valid) {
+    row.classList.add('diff-lost');
+    row.appendChild(badgeEl('invalid', '样例无效'));
+    const err = document.createElement('span');
+    err.className = 'row-error';
+    err.textContent = d.errors.join('；');
+    row.appendChild(err);
+    return row;
+  }
+
+  const flow = document.createElement('span');
+  flow.className = 'replay-flow';
+  flow.appendChild(d.before ? hitChip(d.before) : noneChip());
+  const arrow = document.createElement('span');
+  arrow.className = 'replay-arrow';
+  arrow.textContent = '→';
+  flow.appendChild(arrow);
+  // after 徽章的 position 是建议顺序中的新位置；点击仍定位到当前规则行
+  flow.appendChild(d.after ? hitChip(d.after) : noneChip());
+  row.appendChild(flow);
+
+  if (d.changed) {
+    row.classList.add('diff-changed');
+    row.appendChild(badgeEl('partial', '命中改变'));
+  } else if (d.unmatchedAfter && !d.unmatchedBefore) {
+    row.classList.add('diff-lost');
+    row.appendChild(badgeEl('shadow', '调整后无匹配'));
+  } else if (d.unmatchedBefore && d.unmatchedAfter) {
+    row.appendChild(badgeEl('muted', '始终无匹配'));
+  } else if (d.unmatchedBefore) {
+    row.appendChild(badgeEl('muted', '原本无匹配'));
+  } else {
+    row.appendChild(badgeEl('ok', '一致'));
+  }
+  return row;
 }
 
 function fixStat(cls, label, n) {
@@ -669,5 +861,11 @@ document.getElementById('file-import').addEventListener('change', (e) => {
 });
 
 /* ---------------- 启动 ---------------- */
+samplesEl.value = loadSamples();
+samplesEl.addEventListener('input', () => {
+  saveSamples();
+  scheduleAnalyze();
+});
+
 renderRules();
 scheduleAnalyze(true);

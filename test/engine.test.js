@@ -339,5 +339,139 @@ check('fixPlan: 无冲突/空集时给出稳定空方案', () => {
   assert.strictEqual(f2.shadowAfter, 0);
 });
 
+// ---------- 请求行为回归预演 ----------
+check('replay: 按优先级返回首条命中规则（宽规则在前先命中）', () => {
+  const res = analyze([
+    { id: 'wide', method: 'GET', path: '/api/*' },
+    { id: 'narrow', method: 'GET', path: '/api/users/:id' },
+  ], { samples: ['GET /api/users/42'] });
+  assert.strictEqual(res.replay.summary.total, 1);
+  assert.strictEqual(res.replay.summary.matched, 1);
+  assert.strictEqual(res.replay.samples[0].hit.id, 'wide');
+  assert.strictEqual(res.replay.samples[0].hit.position, 1);
+});
+
+check('replay: ALL 规则匹配任意具体方法，通配符匹配零段', () => {
+  const res = analyze([
+    { id: 'all', method: 'ALL', path: '/health' },
+    { id: 'assets', method: 'GET', path: '/assets/*' },
+  ], { samples: ['DELETE /health', 'GET /assets'] });
+  assert.strictEqual(res.replay.samples[0].hit.id, 'all');
+  assert.strictEqual(res.replay.samples[1].hit.id, 'assets');
+  assert.strictEqual(res.replay.summary.matched, 2);
+});
+
+check('replay: 参数段需非空、根路径可匹配、方法不同不命中', () => {
+  const res = analyze([
+    { id: 'u', method: 'GET', path: '/u/:id' },
+    { id: 'root', method: 'GET', path: '/' },
+  ], { samples: ['GET /u', 'GET /', 'POST /'] });
+  assert.strictEqual(res.replay.samples[0].hit, null); // /u 只有一段，不匹配 /u/:id
+  assert.strictEqual(res.replay.samples[1].hit.id, 'root');
+  assert.strictEqual(res.replay.samples[2].hit, null); // 方法不同
+  assert.strictEqual(res.replay.summary.unmatched, 2);
+});
+
+check('replay: 样例校验——方法须具体、路径须具体', () => {
+  const res = analyze([{ method: 'GET', path: '/a' }], {
+    samples: [
+      'ALL /a',        // 真实请求不允许 ALL
+      'FOO /a',        // 未知方法
+      'GET a',         // 路径未以 / 开头
+      'GET /a/',       // 尾斜杠
+      'GET /a/:id',    // 含参数段
+      'GET /a/*',      // 含通配符
+      'GET /a?x=1',    // 查询串
+      'GET',           // 缺路径
+      'GET /a extra',  // 多余字段
+    ],
+  });
+  const r = res.replay;
+  assert.strictEqual(r.summary.valid, 0);
+  assert.strictEqual(r.summary.invalid, 9);
+  assert.ok(r.samples.every((s) => !s.valid && s.errors.length > 0 && s.hit === null));
+});
+
+check('replay: 对象形式样例与字符串形式等价，方法大小写不敏感', () => {
+  const res = analyze([{ id: 'x', method: 'GET', path: '/a/:id' }], {
+    samples: [{ method: 'get', path: '/a/1' }],
+  });
+  assert.strictEqual(res.replay.samples[0].valid, true);
+  assert.strictEqual(res.replay.samples[0].method, 'GET');
+  assert.strictEqual(res.replay.samples[0].hit.id, 'x');
+});
+
+check('replay: 无效规则不参与匹配', () => {
+  const res = analyze([
+    { id: 'bad', method: 'GET', path: 'no-slash' },
+    { id: 'ok', method: 'GET', path: '/a' },
+  ], { samples: ['GET /a'] });
+  assert.strictEqual(res.replay.samples[0].hit.id, 'ok');
+});
+
+check('replay: 未提供样例时 replay 为 null，兼容旧调用', () => {
+  const res = analyze([{ method: 'GET', path: '/a' }]);
+  assert.strictEqual(res.replay, null);
+  assert.strictEqual(res.fixPlan.replay, null);
+});
+
+check('fixPlan.replay: 标出命中改变、前后无匹配与无效样例', () => {
+  const res = analyze([
+    { id: 'wide', method: 'GET', path: '/api/*' },
+    { id: 'narrow', method: 'GET', path: '/api/users/:id' },
+  ], { samples: ['GET /api/users/42', 'GET /other', 'BAD SAMPLE X'] });
+  const dr = res.fixPlan.replay;
+  assert.strictEqual(dr.summary.total, 3);
+  // 建议顺序为 [narrow, wide]：样例 0 的首条命中由 wide 变为 narrow
+  const d0 = dr.samples[0];
+  assert.strictEqual(d0.before.id, 'wide');
+  assert.strictEqual(d0.after.id, 'narrow');
+  assert.strictEqual(d0.after.position, 1); // narrow 在建议顺序中排第 1
+  assert.strictEqual(d0.changed, true);
+  assert.strictEqual(dr.summary.changed, 1);
+  // 样例 1 调整前后都无匹配
+  const d1 = dr.samples[1];
+  assert.strictEqual(d1.unmatchedBefore, true);
+  assert.strictEqual(d1.unmatchedAfter, true);
+  assert.strictEqual(d1.changed, false);
+  assert.strictEqual(dr.summary.unmatchedBefore, 1);
+  assert.strictEqual(dr.summary.unmatchedAfter, 1);
+  // 无效样例不计入无匹配标记
+  const d2 = dr.samples[2];
+  assert.strictEqual(d2.valid, false);
+  assert.strictEqual(d2.unmatchedBefore, false);
+  assert.strictEqual(d2.unmatchedAfter, false);
+  assert.strictEqual(dr.summary.invalid, 1);
+});
+
+check('fixPlan.replay: 纯重排不改变“是否命中”，只可能改变命中对象', () => {
+  const res = analyze([
+    { method: 'GET', path: '/api/*' },
+    { method: 'GET', path: '/api/users/*' },
+    { method: 'GET', path: '/api/users/:id' },
+    { method: 'GET', path: '/assets/*' },
+    { method: 'GET', path: '/assets/css/*' },
+    { method: 'POST', path: '/api/users' },
+  ], {
+    samples: [
+      'GET /api/users/42',
+      'GET /assets/css/site.css',
+      'POST /api/users',
+      'GET /nowhere',
+    ],
+  });
+  const dr = res.fixPlan.replay;
+  assert.strictEqual(dr.summary.changed, 2); // 前两条样例命中对象改变
+  for (const d of dr.samples) {
+    if (!d.valid) continue;
+    assert.strictEqual(d.unmatchedBefore, d.unmatchedAfter);
+  }
+  // 命中改变的方向符合修复意图：更具体的规则前移后接管
+  const d0 = dr.samples[0];
+  assert.strictEqual(d0.before.index, 0);
+  assert.strictEqual(d0.after.index, 2);
+  assert.strictEqual(d0.after.position, 1);
+});
+
 
 console.log(`\n全部 ${passed} 个测试通过。`);

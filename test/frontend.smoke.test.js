@@ -55,6 +55,7 @@ function makeEl(tag) {
       return all;
     },
     focus() {}, select() {}, click() { this.dispatch('click'); },
+    scrollIntoView() {},
     get textContent() {
       if (this.children.length) return this.children.map((c) => c.textContent).join('');
       return this._text;
@@ -69,6 +70,7 @@ function makeEl(tag) {
 const ids = [
   'rules-list', 'conflicts', 'summary', 'toast', 'fix-plan', 'btn-fix',
   'btn-add', 'btn-reset', 'btn-export', 'btn-import', 'file-import',
+  'samples-input', 'replay-summary', 'replay-results',
 ];
 const els = {};
 for (const id of ids) els[id] = makeEl('div');
@@ -92,7 +94,7 @@ const sandbox = {
     return {
       ok: true,
       status: 200,
-      json: async () => analyze(body.rules),
+      json: async () => analyze(body.rules, { samples: body.samples }),
     };
   },
   URL: { createObjectURL: () => 'blob:x', revokeObjectURL: () => {} },
@@ -112,6 +114,26 @@ vm.runInContext(code, sandbox);
   // 1) 默认示例存在 4 条遮蔽 -> 修复按钮可见
   assert.strictEqual(els['btn-fix'].hidden, false, '存在遮蔽时应显示“生成修复方案”按钮');
 
+  // 1b) 默认样例的回归预演：5 条样例全部按输入顺序渲染，首条命中规则正确
+  const replayRows = els['replay-results'].children;
+  assert.strictEqual(replayRows.length, 5, '默认 5 条样例应全部渲染');
+  const hitChips = els['replay-results']
+    .querySelectorAll()
+    .filter((c) => c.className === 'hit-chip');
+  assert.strictEqual(hitChips.length, 3, '默认样例应有 3 条命中');
+  assert.strictEqual(
+    hitChips[0].textContent, '#1 GET /api/*',
+    'GET /api/users/42 应被最宽的 #1 截胡（首条命中）'
+  );
+  assert.strictEqual(hitChips[1].textContent, '#8 POST /api/users');
+  assert.strictEqual(hitChips[2].textContent, '#4 GET /assets/*');
+  const noMatchBadges = els['replay-results']
+    .querySelectorAll()
+    .filter((c) => c.className === 'badge badge-muted' && c.textContent === '无匹配');
+  assert.strictEqual(noMatchBadges.length, 2, 'GET /health 与 DELETE /api/users/42 应无匹配');
+  // 点击命中徽章定位规则行（stub 中选择器找不到行，应静默返回不抛错）
+  hitChips[0].dispatch('click');
+
   // 2) 打开修复方案预览
   els['btn-fix'].dispatch('click');
   await new Promise((r) => setTimeout(r, 10));
@@ -124,6 +146,21 @@ vm.runInContext(code, sandbox);
   // 默认示例全部可修复
   assert.ok(previewText.includes('一次应用（移动 4 条）'), '应显示一次应用按钮及移动数');
   assert.ok(!/仍将存在的/.test(previewText), '全可修复时不应有残留遮蔽区块');
+  // 修复预览中的请求行为对比：同一批样例的前后命中
+  assert.ok(previewText.includes('请求行为对比'), '预览应包含请求行为对比区块');
+  assert.ok(previewText.includes('命中改变 2'), '应有 2 条样例命中规则改变');
+  const diffRows = els['fix-plan']
+    .querySelectorAll()
+    .filter((c) => c.className.includes('replay-diff-row'));
+  assert.strictEqual(diffRows.length, 5, '对比行应按输入顺序逐条展示');
+  const changedBadges = els['fix-plan']
+    .querySelectorAll()
+    .filter((c) => c.className === 'badge badge-partial' && c.textContent === '命中改变');
+  assert.strictEqual(changedBadges.length, 2, '应标出 2 条“命中改变”');
+  const alwaysMiss = els['fix-plan']
+    .querySelectorAll()
+    .filter((c) => c.className === 'badge badge-muted' && c.textContent === '始终无匹配');
+  assert.strictEqual(alwaysMiss.length, 2, '应标出 2 条前后均无匹配');
 
   // 3) 一次应用
   const applyBtn = els['fix-plan']
@@ -142,6 +179,16 @@ vm.runInContext(code, sandbox);
   assert.strictEqual(saved[4].path, '/assets/*');
   assert.strictEqual(els['fix-plan'].hidden, true, '应用后应收起预览');
   assert.strictEqual(els['btn-fix'].hidden, true, '无遮蔽时修复按钮应隐藏');
+
+  // 3b) 应用修复后回归预演自动重算：首条命中变为更具体的规则
+  const hitChipsAfter = els['replay-results']
+    .querySelectorAll()
+    .filter((c) => c.className === 'hit-chip');
+  assert.strictEqual(
+    hitChipsAfter[0].textContent, '#1 GET /api/users/:id',
+    '重排后 GET /api/users/42 应由最具体的规则接管'
+  );
+  assert.strictEqual(hitChipsAfter[2].textContent, '#4 GET /assets/css/*');
 
   // 4) 不可消除场景：导入含等价重复规则的规则集，预览必须如实标注残留遮蔽
   sandbox.FileReader = class {
